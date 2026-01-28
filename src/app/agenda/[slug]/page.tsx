@@ -89,7 +89,7 @@ export default function PublicAgendaPage() {
   const scrollToCurrentTime = useCallback(() => {
     if (!agendaRef.current) return;
     const now = new Date();
-    const currentHour = now.getHours();
+    const currentHour = now.getUTCHours();
     const hourIndex = currentHour - settings.start_hour;
     if (hourIndex >= 0 && hourIndex < HOURS.length) {
       const rows = agendaRef.current.querySelectorAll("[data-hour]");
@@ -292,7 +292,7 @@ export default function PublicAgendaPage() {
       return (
         apt.barber_id === barberId &&
         formatDate(aptDate) === formatDate(date) &&
-        aptDate.getHours() === hour
+        aptDate.getUTCHours() === hour
       );
     });
   }
@@ -419,7 +419,7 @@ export default function PublicAgendaPage() {
               </div>
               {filteredWeekDays.map((day, dayIndex) => {
                 const isToday = formatDate(day) === formatDate(currentTime);
-                const isCurrentHour = isToday && currentTime.getHours() === hour;
+                const isCurrentHour = isToday && currentTime.getUTCHours() === hour;
 
                 return (
                   <div
