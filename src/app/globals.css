@@ -247,3 +247,20 @@ input[type="time"]::-webkit-calendar-picker-indicator:hover {
     transform: rotate(360deg);
   }
 }
+
+/* Chat option buttons - fade in animation */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.4s ease-out forwards;
+  opacity: 0;
+}

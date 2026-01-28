@@ -260,16 +260,10 @@ export function BookingChat({
   const inputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
 
-  // Scroll to bottom and focus input on new messages
+  // Scroll to bottom on new messages (no auto-focus to avoid keyboard popup on mobile)
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    // Focus input after bot responds (small delay to ensure smooth scroll first)
-    if (!loading) {
-      setTimeout(() => {
-        inputRef.current?.focus();
-      }, 100);
-    }
-  }, [messages, loading]);
+  }, [messages]);
 
   // Load initial data and check for existing appointments
   useEffect(() => {
@@ -683,12 +677,13 @@ export function BookingChat({
 
               {msg.options && (
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {msg.options.map((opt) => (
+                  {msg.options.map((opt, index) => (
                     <button
                       key={opt.value}
                       onClick={() => handleOptionClick(opt.value, opt.label)}
                       disabled={loading}
-                      className="px-3 py-2 sm:px-3 sm:py-1.5 bg-primary/10 hover:bg-primary/20 active:bg-primary/30 text-primary rounded-full text-sm font-medium transition-colors disabled:opacity-50 touch-manipulation"
+                      className="px-4 py-2.5 bg-primary hover:bg-primary/90 active:bg-primary/80 text-primary-foreground rounded-full text-sm font-medium transition-all disabled:opacity-50 touch-manipulation shadow-sm hover:shadow-md animate-fade-in"
+                      style={{ animationDelay: `${index * 100}ms` }}
                     >
                       {opt.label}
                     </button>
