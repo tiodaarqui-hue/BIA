@@ -28,6 +28,13 @@ interface Barber {
   name: string;
 }
 
+interface ExistingAppointment {
+  id: string;
+  scheduled_at: string;
+  service: { name: string } | null;
+  barber: { name: string } | null;
+}
+
 type Step = "service" | "barber" | "date" | "time" | "confirm" | "done";
 
 const DAYS_PT = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
@@ -301,7 +308,7 @@ export function BookingChat({
       setBarbers(barbersRes.data || []);
 
       // Check if customer has existing appointment
-      const existingAppointment = appointmentsRes.data?.[0];
+      const existingAppointment = appointmentsRes.data?.[0] as ExistingAppointment | undefined;
 
       if (existingAppointment) {
         // Show existing appointment and ask if they want to schedule another
