@@ -226,6 +226,35 @@ export default function PublicAgendaPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Silent auto-refresh every 15 seconds
+  useEffect(() => {
+    if (!barbershopId) return;
+
+    const refreshAppointments = async () => {
+      const startOfWeek = formatDate(weekDays[0]);
+      const endOfWeek = formatDate(weekDays[6]);
+
+      const { data } = await supabase
+        .from("appointments")
+        .select(`
+          id, scheduled_at, duration_minutes, status, barber_id,
+          customer:customers(name),
+          service:services(name)
+        `)
+        .eq("barbershop_id", barbershopId)
+        .gte("scheduled_at", `${startOfWeek}T00:00:00`)
+        .lte("scheduled_at", `${endOfWeek}T23:59:59`)
+        .in("status", ["scheduled", "completed"]);
+
+      if (data) {
+        setAppointments(data as unknown as Appointment[]);
+      }
+    };
+
+    const interval = setInterval(refreshAppointments, 15000);
+    return () => clearInterval(interval);
+  }, [barbershopId, supabase, weekDays]);
+
   // Auto-scroll when hour changes
   useEffect(() => {
     const now = new Date();
