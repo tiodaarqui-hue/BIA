@@ -1,47 +1,108 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { toBrazilTime } from "@/lib/timezone";
+import { bookingSchema, validateBody } from "@/lib/validations";
+import { ErrorCodes, createError } from "@/lib/errors";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+interface ServiceData {
+  id: string;
+  name: string;
+  price: number;
+  duration_minutes: number;
+}
+
+interface MemberPlan {
+  included_service_ids: string[] | null;
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const { customerId, barberId, serviceId, scheduledAt, barbershopId } =
-      await request.json();
+    const body = await request.json();
+    const validation = validateBody(bookingSchema, body);
 
-    if (!customerId || !serviceId || !scheduledAt || !barbershopId) {
+    if (!validation.success) {
       return NextResponse.json(
-        { error: "Dados incompletos para agendamento" },
+        { error: validation.error, code: "VALIDATION_ERROR" },
         { status: 400 }
       );
     }
 
-    // Get service details
-    const { data: service, error: serviceError } = await supabase
-      .from("services")
-      .select("id, name, price, duration_minutes")
-      .eq("id", serviceId)
-      .eq("barbershop_id", barbershopId)
+    const { customerId, barberId, serviceIds, scheduledAt, barbershopId } = validation.data;
+
+    // Get customer membership status
+    const { data: customer } = await supabase
+      .from("customers")
+      .select(`
+        is_member,
+        member_expires_at,
+        member_plan:member_plans(included_service_ids)
+      `)
+      .eq("id", customerId)
       .single();
 
-    if (serviceError || !service) {
+    // Determine covered services (if member with active plan)
+    let coveredServiceIds: string[] = [];
+    const now = new Date();
+
+    if (customer?.is_member && customer.member_expires_at) {
+      const expiresAt = new Date(customer.member_expires_at);
+      if (expiresAt > now) {
+        // Member with active plan - get covered services
+        // Supabase returns single relation as object, not array
+        const memberPlan = Array.isArray(customer.member_plan)
+          ? customer.member_plan[0] as MemberPlan | undefined
+          : customer.member_plan as MemberPlan | null;
+        coveredServiceIds = memberPlan?.included_service_ids || [];
+      }
+    }
+
+    // Get all selected services
+    const { data: services, error: servicesError } = await supabase
+      .from("services")
+      .select("id, name, price, duration_minutes")
+      .in("id", serviceIds)
+      .eq("barbershop_id", barbershopId);
+
+    if (servicesError || !services || services.length === 0) {
       return NextResponse.json(
-        { error: "Serviço não encontrado" },
+        createError(ErrorCodes.SERVICE_NOT_FOUND, "Serviço(s) não encontrado(s)"),
         { status: 404 }
       );
     }
+
+    // Verify all requested services were found
+    if (services.length !== serviceIds.length) {
+      return NextResponse.json(
+        createError(ErrorCodes.SERVICE_NOT_FOUND, "Um ou mais serviços não encontrados"),
+        { status: 404 }
+      );
+    }
+
+    // Separate covered vs chargeable services
+    const coveredServices = services.filter(s => coveredServiceIds.includes(s.id));
+    const chargeableServices = services.filter(s => !coveredServiceIds.includes(s.id));
+
+    // Calculate totals
+    const totalDuration = services.reduce((sum, s) => sum + s.duration_minutes, 0);
+    // Only charge for services NOT covered by plan
+    const totalAmount = chargeableServices.reduce((sum, s) => sum + Number(s.price), 0);
+    // Full price (for reference/display)
+    const fullPrice = services.reduce((sum, s) => sum + Number(s.price), 0);
+
+    // Calculate end time
+    const scheduledDate = new Date(scheduledAt);
+    const endTime = new Date(scheduledDate.getTime() + totalDuration * 60000);
 
     // If no barber selected, find first available
     let finalBarberId = barberId;
 
     if (!finalBarberId) {
-      const scheduledDate = new Date(scheduledAt);
-      const dayOfWeek = scheduledDate.getDay();
-      const hour = scheduledDate.getHours();
-
-      // Get all active barbers with schedules for this day
+      // Get all active barbers
       const { data: barbers } = await supabase
         .from("barbers")
         .select("id")
@@ -50,7 +111,7 @@ export async function POST(request: NextRequest) {
 
       if (!barbers || barbers.length === 0) {
         return NextResponse.json(
-          { error: "Nenhum barbeiro disponível" },
+          createError(ErrorCodes.NO_BARBERS_AVAILABLE, "Nenhum barbeiro disponível"),
           { status: 404 }
         );
       }
@@ -60,7 +121,7 @@ export async function POST(request: NextRequest) {
         const isAvailable = await checkBarberAvailability(
           barber.id,
           scheduledAt,
-          service.duration_minutes,
+          totalDuration,
           barbershopId
         );
         if (isAvailable) {
@@ -71,7 +132,7 @@ export async function POST(request: NextRequest) {
 
       if (!finalBarberId) {
         return NextResponse.json(
-          { error: "Nenhum barbeiro disponível neste horário" },
+          createError(ErrorCodes.SLOT_CONFLICT, "Nenhum barbeiro disponível neste horário"),
           { status: 409 }
         );
       }
@@ -80,38 +141,78 @@ export async function POST(request: NextRequest) {
       const isAvailable = await checkBarberAvailability(
         finalBarberId,
         scheduledAt,
-        service.duration_minutes,
+        totalDuration,
         barbershopId
       );
 
       if (!isAvailable) {
         return NextResponse.json(
-          { error: "Barbeiro não disponível neste horário" },
+          createError(ErrorCodes.BARBER_NOT_AVAILABLE, "Barbeiro não disponível neste horário"),
           { status: 409 }
         );
       }
     }
 
-    // Create appointment
+    // Create appointment with multi-service support
+    // price = amount to charge (excludes plan-covered services)
+    // total_amount = same as price (for consistency)
     const { data: appointment, error: insertError } = await supabase
       .from("appointments")
       .insert({
         customer_id: customerId,
         barber_id: finalBarberId,
-        service_id: serviceId,
+        service_id: serviceIds[0], // Primary service for backwards compatibility
         scheduled_at: scheduledAt,
-        duration_minutes: service.duration_minutes,
-        price: service.price,
+        end_time: endTime.toISOString(),
+        duration_minutes: totalDuration,
+        total_duration: totalDuration,
+        price: totalAmount,
+        total_amount: totalAmount,
         status: "scheduled",
         barbershop_id: barbershopId,
       })
-      .select("id, scheduled_at, duration_minutes, status")
+      .select("id, scheduled_at, end_time, duration_minutes, total_duration, total_amount, status")
       .single();
 
     if (insertError) {
       console.error("Insert appointment error:", insertError);
+
+      // Check if it's a constraint violation (double-booking)
+      if (insertError.code === "23P01") {
+        return NextResponse.json(
+          createError(ErrorCodes.SLOT_CONFLICT, "Horário já ocupado por outro agendamento"),
+          { status: 409 }
+        );
+      }
+
       return NextResponse.json(
-        { error: "Erro ao criar agendamento" },
+        createError(ErrorCodes.INTERNAL_ERROR, "Erro ao criar agendamento"),
+        { status: 500 }
+      );
+    }
+
+    // Create appointment_services records with snapshots
+    // Mark which services are covered by plan vs chargeable
+    const appointmentServices = services.map((service: ServiceData) => ({
+      appointment_id: appointment.id,
+      service_id: service.id,
+      barbershop_id: barbershopId,
+      service_name_snapshot: service.name,
+      duration_snapshot: service.duration_minutes,
+      price_snapshot: service.price,
+      covered_by_plan: coveredServiceIds.includes(service.id),
+    }));
+
+    const { error: servicesInsertError } = await supabase
+      .from("appointment_services")
+      .insert(appointmentServices);
+
+    if (servicesInsertError) {
+      console.error("Insert appointment_services error:", servicesInsertError);
+      // Rollback the appointment
+      await supabase.from("appointments").delete().eq("id", appointment.id);
+      return NextResponse.json(
+        createError(ErrorCodes.INTERNAL_ERROR, "Erro ao criar serviços do agendamento"),
         { status: 500 }
       );
     }
@@ -128,13 +229,16 @@ export async function POST(request: NextRequest) {
       appointment: {
         ...appointment,
         barber: barber,
-        service: service,
+        services: services,
+        covered_services: coveredServices.map(s => s.name),
+        chargeable_services: chargeableServices.map(s => s.name),
+        full_price: fullPrice,
       },
     });
   } catch (error) {
     console.error("Book error:", error);
     return NextResponse.json(
-      { error: "Erro interno do servidor" },
+      createError(ErrorCodes.INTERNAL_ERROR, "Erro interno do servidor"),
       { status: 500 }
     );
   }
@@ -147,8 +251,9 @@ async function checkBarberAvailability(
   barbershopId: string
 ): Promise<boolean> {
   const scheduledDate = new Date(scheduledAt);
-  const dayOfWeek = scheduledDate.getDay();
-  const hour = scheduledDate.getHours();
+  const brazilTime = toBrazilTime(scheduledDate);
+  const dayOfWeek = brazilTime.dayOfWeek;
+  const hour = brazilTime.hours;
 
   // Get agenda settings for fallback
   const { data: settings } = await supabase
@@ -204,7 +309,7 @@ async function checkBarberAvailability(
     return false;
   }
 
-  // Check for conflicting appointments
+  // Check for conflicting appointments (using end_time)
   const endTime = new Date(scheduledDate.getTime() + durationMinutes * 60000);
   const startOfDay = new Date(scheduledDate);
   startOfDay.setHours(0, 0, 0, 0);
@@ -213,7 +318,7 @@ async function checkBarberAvailability(
 
   const { data: appointments } = await supabase
     .from("appointments")
-    .select("scheduled_at, duration_minutes")
+    .select("scheduled_at, end_time")
     .eq("barber_id", barberId)
     .eq("barbershop_id", barbershopId)
     .gte("scheduled_at", startOfDay.toISOString())
@@ -223,7 +328,7 @@ async function checkBarberAvailability(
   if (appointments) {
     for (const apt of appointments) {
       const aptStart = new Date(apt.scheduled_at);
-      const aptEnd = new Date(aptStart.getTime() + apt.duration_minutes * 60000);
+      const aptEnd = new Date(apt.end_time);
 
       // Check overlap
       if (scheduledDate < aptEnd && endTime > aptStart) {

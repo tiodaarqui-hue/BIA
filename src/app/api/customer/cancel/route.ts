@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { cancelSchema, validateBody } from "@/lib/validations";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,14 +9,17 @@ const supabase = createClient(
 
 export async function POST(request: NextRequest) {
   try {
-    const { appointmentId, customerId } = await request.json();
+    const body = await request.json();
+    const validation = validateBody(cancelSchema, body);
 
-    if (!appointmentId || !customerId) {
+    if (!validation.success) {
       return NextResponse.json(
-        { error: "Dados incompletos" },
+        { error: validation.error, code: "VALIDATION_ERROR" },
         { status: 400 }
       );
     }
+
+    const { appointmentId, customerId } = validation.data;
 
     // Get the appointment
     const { data: appointment, error: fetchError } = await supabase

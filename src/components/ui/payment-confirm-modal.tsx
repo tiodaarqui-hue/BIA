@@ -61,21 +61,69 @@ export function PaymentConfirmModal({
     setError("");
     setLoading(true);
 
+    const now = new Date();
     const paymentData = {
       customer_id: customerId,
       appointment_id: appointmentId || null,
       amount,
       method,
       status,
-      paid_at: status === "paid" ? new Date().toISOString() : null,
+      paid_at: status === "paid" ? now.toISOString() : null,
     };
 
-    const { error: insertError } = await supabase.from("payments").insert(paymentData);
+    const { data: payment, error: insertError } = await supabase
+      .from("payments")
+      .insert(paymentData)
+      .select("id, barbershop_id")
+      .single();
 
-    if (insertError) {
-      setError("Erro ao registrar pagamento: " + insertError.message);
+    if (insertError || !payment) {
+      setError("Erro ao registrar pagamento: " + (insertError?.message || "Erro desconhecido"));
       setLoading(false);
       return;
+    }
+
+    // If this is a subscription payment (no appointment) and it's paid, create the revenue cycle
+    const isSubscriptionPayment = !appointmentId;
+    if (isSubscriptionPayment && status === "paid") {
+      const cycleEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+      await supabase.from("member_plan_cycles").insert({
+        barbershop_id: payment.barbershop_id,
+        customer_id: customerId,
+        payment_id: payment.id,
+        cycle_start: now.toISOString().split("T")[0],
+        cycle_end: cycleEnd.toISOString().split("T")[0],
+        total_amount: amount,
+        status: "open",
+      });
+    }
+
+    // If this is a service payment (has appointment) and it's paid, create commission immediately
+    const isServicePayment = !!appointmentId;
+    if (isServicePayment && status === "paid") {
+      // Get appointment with barber info
+      const { data: appointment } = await supabase
+        .from("appointments")
+        .select("barber_id, barber:barbers(commission_percent)")
+        .eq("id", appointmentId)
+        .single();
+
+      if (appointment?.barber_id) {
+        const barberData = appointment.barber as unknown as { commission_percent: number } | null;
+        const commissionPercent = barberData?.commission_percent ?? 50;
+        const commissionAmount = amount * (commissionPercent / 100);
+
+        await supabase.from("member_commissions").insert({
+          barbershop_id: payment.barbershop_id,
+          barber_id: appointment.barber_id,
+          appointment_id: appointmentId,
+          cycle_id: null, // No cycle for service commissions
+          unit_value: amount,
+          commission_percent: commissionPercent,
+          commission_amount: commissionAmount,
+        });
+      }
     }
 
     setLoading(false);

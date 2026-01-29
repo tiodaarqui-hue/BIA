@@ -48,6 +48,7 @@ interface Appointment {
     name: string;
     phone: string;
     no_show_count: number;
+    is_member: boolean;
   };
   barber: {
     id: string;
@@ -198,7 +199,7 @@ export default function AgendaPage() {
             price,
             notes,
             barber_id,
-            customer:customers(id, name, phone, no_show_count),
+            customer:customers(id, name, phone, no_show_count, is_member),
             barber:barbers(id, name),
             service:services(id, name, price)
           `)
@@ -217,7 +218,7 @@ export default function AgendaPage() {
         supabase
           .from("agenda_settings")
           .select("start_hour, end_hour, enabled_days")
-          .single(),
+          .maybeSingle(),
       ]);
 
       if (isCancelled) return;
@@ -236,6 +237,34 @@ export default function AgendaPage() {
 
       if (settingsRes.data) {
         setAgendaSettings(settingsRes.data as AgendaSettings);
+      } else {
+        // Auto-create default settings if none exist
+        // First get the user's barbershop_id
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data: staffData } = await supabase
+            .from("staff")
+            .select("barbershop_id")
+            .eq("auth_user_id", user.id)
+            .single();
+
+          if (staffData?.barbershop_id) {
+            const { data: newSettings } = await supabase
+              .from("agenda_settings")
+              .insert({
+                barbershop_id: staffData.barbershop_id,
+                start_hour: DEFAULT_SETTINGS.start_hour,
+                end_hour: DEFAULT_SETTINGS.end_hour,
+                enabled_days: DEFAULT_SETTINGS.enabled_days,
+              })
+              .select()
+              .single();
+
+            if (newSettings) {
+              setAgendaSettings(newSettings as AgendaSettings);
+            }
+          }
+        }
       }
 
       if (appointmentsRes.data) {
@@ -275,7 +304,7 @@ export default function AgendaPage() {
               price,
               notes,
               barber_id,
-              customer:customers(id, name, phone, no_show_count),
+              customer:customers(id, name, phone, no_show_count, is_member),
               barber:barbers(id, name),
               service:services(id, name, price)
             `)
@@ -655,8 +684,15 @@ export default function AgendaPage() {
                             statusColors[apt.status] || "bg-muted border-border hover:bg-muted/80"
                           }`}
                         >
-                          <p className="font-medium truncate">
-                            {apt.customer?.name || "Cliente"}
+                          <p className="font-medium truncate flex items-center gap-1">
+                            {apt.customer?.is_member && (
+                              <svg className="w-3 h-3 text-amber-400 drop-shadow-[0_0_4px_rgba(251,191,36,0.6)] shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm0 3h14v2H5v-2z"/>
+                              </svg>
+                            )}
+                            <span className={`truncate ${apt.customer?.is_member ? "member-shimmer" : ""}`}>
+                              {apt.customer?.name || "Cliente"}
+                            </span>
                           </p>
                           <p className="text-blue-400 truncate text-[10px] flex items-center gap-1">
                             <svg className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

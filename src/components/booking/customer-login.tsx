@@ -31,9 +31,10 @@ export function CustomerLogin({ barbershopId, barbershopName, onSuccess }: Custo
 
     try {
       const endpoint = mode === "login" ? "/api/customer/login" : "/api/customer/register";
+      const phoneDigits = phone.replace(/\D/g, ""); // Send only digits
       const body = mode === "login"
-        ? { phone, password, barbershopId }
-        : { name, phone, password, barbershopId };
+        ? { phone: phoneDigits, password, barbershopId }
+        : { name, phone: phoneDigits, password, barbershopId };
 
       const res = await fetch(endpoint, {
         method: "POST",

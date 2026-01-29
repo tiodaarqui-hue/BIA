@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { verifyPassword, formatPhone, validatePhone } from "@/lib/customer-auth";
+import { verifyPassword, formatPhone } from "@/lib/customer-auth";
+import { customerLoginSchema, validateBody } from "@/lib/validations";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,33 +10,36 @@ const supabase = createClient(
 
 export async function POST(request: NextRequest) {
   try {
-    const { phone, password, barbershopId } = await request.json();
+    const body = await request.json();
+    const validation = validateBody(customerLoginSchema, body);
 
-    if (!phone || !password || !barbershopId) {
+    if (!validation.success) {
       return NextResponse.json(
-        { error: "Telefone, senha e barbearia são obrigatórios" },
+        { error: validation.error, code: "VALIDATION_ERROR" },
         { status: 400 }
       );
     }
 
-    if (!validatePhone(phone)) {
-      return NextResponse.json(
-        { error: "Telefone inválido" },
-        { status: 400 }
-      );
-    }
+    const { phone, password, barbershopId } = validation.data;
+    const digits = phone.replace(/\D/g, "");
 
-    const formattedPhone = formatPhone(phone);
+    // Try multiple phone formats to find customer
+    const phoneFormats = [
+      digits,
+      `+55${digits}`,
+      `+${digits}`,
+    ];
 
-    // Find customer
-    const { data: customer, error: findError } = await supabase
+    // Find customer with any of the phone formats
+    const { data: customers } = await supabase
       .from("customers")
       .select("id, name, phone, password_hash")
-      .eq("phone", formattedPhone)
-      .eq("barbershop_id", barbershopId)
-      .single();
+      .in("phone", phoneFormats)
+      .eq("barbershop_id", barbershopId);
 
-    if (findError || !customer) {
+    const customer = customers?.[0];
+
+    if (!customer) {
       return NextResponse.json(
         { error: "Telefone não encontrado. Crie uma conta." },
         { status: 404 }

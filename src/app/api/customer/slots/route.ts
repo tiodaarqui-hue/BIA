@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { toBrazilTime, brazilTimeToUtc, getBrazilDayRange } from "@/lib/timezone";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,10 +22,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const targetDate = new Date(date + "T00:00:00");
-    const dayOfWeek = targetDate.getDay();
+    // Get day of week from the date string (Brazil date)
+    const dayOfWeek = new Date(date + "T12:00:00").getDay();
+
+    // Get current time in Brazil for "today" comparison and past slot filtering
     const now = new Date();
-    const isToday = targetDate.toDateString() === now.toDateString();
+    const nowBrazil = toBrazilTime(now);
+    const isToday = date === nowBrazil.dateStr;
 
     // Get agenda settings
     const { data: settings } = await supabase
@@ -73,27 +77,24 @@ export async function GET(request: NextRequest) {
     // Group barbers by whether they have ANY schedule configured
     const barbersWithSchedules = new Set(allSchedules?.map((s) => s.barber_id) || []);
 
-    // Get blocks for this day
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Get blocks for this day (using Brazil timezone range in UTC)
+    const { startUtc: startOfDayUtc, endUtc: endOfDayUtc } = getBrazilDayRange(date);
 
     const { data: blocks } = await supabase
       .from("barber_blocks")
       .select("barber_id, start_at, end_at")
       .in("barber_id", barbersToCheck)
-      .lte("start_at", endOfDay.toISOString())
-      .gte("end_at", startOfDay.toISOString());
+      .lte("start_at", endOfDayUtc.toISOString())
+      .gte("end_at", startOfDayUtc.toISOString());
 
-    // Get existing appointments for this day
+    // Get existing appointments for this day (include end_time for multi-service appointments)
     const { data: appointments } = await supabase
       .from("appointments")
-      .select("barber_id, scheduled_at, duration_minutes")
+      .select("barber_id, scheduled_at, duration_minutes, end_time")
       .eq("barbershop_id", barbershopId)
       .in("barber_id", barbersToCheck)
-      .gte("scheduled_at", startOfDay.toISOString())
-      .lte("scheduled_at", endOfDay.toISOString())
+      .gte("scheduled_at", startOfDayUtc.toISOString())
+      .lte("scheduled_at", endOfDayUtc.toISOString())
       .neq("status", "cancelled");
 
     // Generate available slots
@@ -102,13 +103,17 @@ export async function GET(request: NextRequest) {
 
     for (let hour = startHour; hour < endHour; hour++) {
       for (let minute = 0; minute < 60; minute += slotInterval) {
-        const slotTime = new Date(targetDate);
-        slotTime.setHours(hour, minute, 0, 0);
-
-        // Skip past slots if today
-        if (isToday && slotTime <= now) {
-          continue;
+        // Skip past slots if today (compare using Brazil time)
+        if (isToday) {
+          const slotMinutes = hour * 60 + minute;
+          const nowMinutes = nowBrazil.hours * 60 + nowBrazil.minutes;
+          if (slotMinutes <= nowMinutes) {
+            continue;
+          }
         }
+
+        // Create slot time in UTC (Brazil time → UTC)
+        const slotTimeUtc = brazilTimeToUtc(date, hour, minute);
 
         // Check if any barber is available at this slot
         let isAvailable = false;
@@ -130,23 +135,26 @@ export async function GET(request: NextRequest) {
 
           if (hour < schedStart || hour >= schedEnd) continue;
 
-          // Check blocks
+          // Check blocks (stored in UTC)
           const isBlocked = blocks?.some((block) => {
             if (block.barber_id !== bId) return false;
             const blockStart = new Date(block.start_at);
             const blockEnd = new Date(block.end_at);
-            return slotTime >= blockStart && slotTime < blockEnd;
+            return slotTimeUtc >= blockStart && slotTimeUtc < blockEnd;
           });
 
           if (isBlocked) continue;
 
-          // Check existing appointments
-          const slotEnd = new Date(slotTime.getTime() + serviceDuration * 60000);
+          // Check existing appointments (stored in UTC, use end_time if available for multi-service)
+          const slotEndUtc = new Date(slotTimeUtc.getTime() + serviceDuration * 60000);
           const hasConflict = appointments?.some((apt) => {
             if (apt.barber_id !== bId) return false;
             const aptStart = new Date(apt.scheduled_at);
-            const aptEnd = new Date(aptStart.getTime() + apt.duration_minutes * 60000);
-            return slotTime < aptEnd && slotEnd > aptStart;
+            // Use end_time if available (multi-service), otherwise calculate from duration
+            const aptEnd = apt.end_time
+              ? new Date(apt.end_time)
+              : new Date(aptStart.getTime() + apt.duration_minutes * 60000);
+            return slotTimeUtc < aptEnd && slotEndUtc > aptStart;
           });
 
           if (!hasConflict) {

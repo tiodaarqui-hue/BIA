@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-const WHATSAPP_NUMBER = "5562991918050";
+const WHATSAPP_NUMBER = process.env.NEXT_PUBLIC_SUPPORT_WHATSAPP || "";
 const WHATSAPP_MESSAGE = "Olá! Gostaria de solicitar acesso ao sistema BIA.";
 
 function LoadingScreen({ onComplete }: { onComplete: () => void }) {

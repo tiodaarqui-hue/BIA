@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { hashPassword, formatPhone, validatePhone } from "@/lib/customer-auth";
+import { hashPassword, formatPhone } from "@/lib/customer-auth";
+import { customerRegisterSchema, validateBody } from "@/lib/validations";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,29 +10,17 @@ const supabase = createClient(
 
 export async function POST(request: NextRequest) {
   try {
-    const { name, phone, password, barbershopId } = await request.json();
+    const body = await request.json();
+    const validation = validateBody(customerRegisterSchema, body);
 
-    if (!name || !phone || !password || !barbershopId) {
+    if (!validation.success) {
       return NextResponse.json(
-        { error: "Nome, telefone, senha e barbearia são obrigatórios" },
+        { error: validation.error, code: "VALIDATION_ERROR" },
         { status: 400 }
       );
     }
 
-    if (!validatePhone(phone)) {
-      return NextResponse.json(
-        { error: "Telefone inválido. Use formato: (11) 99999-9999" },
-        { status: 400 }
-      );
-    }
-
-    if (password.length < 4) {
-      return NextResponse.json(
-        { error: "Senha deve ter pelo menos 4 caracteres" },
-        { status: 400 }
-      );
-    }
-
+    const { name, phone, password, barbershopId } = validation.data;
     const formattedPhone = formatPhone(phone);
 
     // Check if customer already exists for this barbershop

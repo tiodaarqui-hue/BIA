@@ -11,7 +11,6 @@ interface Service {
   description: string | null;
   price: number;
   duration_minutes: number;
-  commission_percent: number;
   is_member_only: boolean;
   is_active: boolean;
   created_at: string;
@@ -172,7 +171,7 @@ export default function ServicosPage() {
                   )}
                 </div>
 
-                <div className="mt-4 pt-4 border-t border-border grid grid-cols-3 gap-4 text-center">
+                <div className="mt-4 pt-4 border-t border-border grid grid-cols-2 gap-4 text-center">
                   <div>
                     <p className="text-2xl font-light text-primary">
                       R$ {service.price.toFixed(2).replace(".", ",")}
@@ -184,12 +183,6 @@ export default function ServicosPage() {
                       {formatDuration(service.duration_minutes)}
                     </p>
                     <p className="text-xs text-muted-foreground">Duração</p>
-                  </div>
-                  <div>
-                    <p className="text-2xl font-light">
-                      {service.commission_percent}%
-                    </p>
-                    <p className="text-xs text-muted-foreground">Comissão</p>
                   </div>
                 </div>
               </div>
@@ -233,7 +226,6 @@ function ServiceModal({ service, isOpen, onClose, onSuccess }: ServiceModalProps
     description: "",
     price: "",
     duration_minutes: "30",
-    commission_percent: "0",
     is_member_only: false,
     is_active: true,
   });
@@ -247,7 +239,6 @@ function ServiceModal({ service, isOpen, onClose, onSuccess }: ServiceModalProps
         description: service.description || "",
         price: service.price.toString(),
         duration_minutes: service.duration_minutes.toString(),
-        commission_percent: service.commission_percent.toString(),
         is_member_only: service.is_member_only,
         is_active: service.is_active,
       });
@@ -257,7 +248,6 @@ function ServiceModal({ service, isOpen, onClose, onSuccess }: ServiceModalProps
         description: "",
         price: "",
         duration_minutes: "30",
-        commission_percent: "0",
         is_member_only: false,
         is_active: true,
       });
@@ -291,7 +281,6 @@ function ServiceModal({ service, isOpen, onClose, onSuccess }: ServiceModalProps
       description: formData.description.trim() || null,
       price: parseFloat(formData.price),
       duration_minutes: parseInt(formData.duration_minutes),
-      commission_percent: parseFloat(formData.commission_percent) || 0,
       is_member_only: formData.is_member_only,
       is_active: formData.is_active,
     };
@@ -389,20 +378,6 @@ function ServiceModal({ service, isOpen, onClose, onSuccess }: ServiceModalProps
               ))}
             </select>
           </div>
-        </div>
-
-        <div>
-          <label className="block text-sm text-muted-foreground mb-1">Comissão do barbeiro (%)</label>
-          <input
-            type="number"
-            min="0"
-            max="100"
-            step="0.5"
-            value={formData.commission_percent}
-            onChange={(e) => setFormData((prev) => ({ ...prev, commission_percent: e.target.value }))}
-            placeholder="0"
-            className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:border-primary"
-          />
         </div>
 
         <div className="space-y-3 pt-2 border-t border-border">

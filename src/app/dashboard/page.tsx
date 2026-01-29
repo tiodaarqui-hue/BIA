@@ -36,6 +36,15 @@ interface TodayAppointment {
   };
 }
 
+interface OpenCycle {
+  id: string;
+  total_amount: number;
+  cycle_end: string;
+  customer: {
+    name: string;
+  };
+}
+
 async function getStats() {
   const supabase = await createClient();
 
@@ -108,6 +117,22 @@ async function getTodayAppointments(): Promise<TodayAppointment[]> {
     .limit(10);
 
   return (data as unknown as TodayAppointment[]) || [];
+}
+
+async function getCyclesReadyToClose(): Promise<OpenCycle[]> {
+  const supabase = await createClient();
+
+  const today = new Date().toISOString().split("T")[0];
+
+  const { data } = await supabase
+    .from("member_plan_cycles")
+    .select("id, total_amount, cycle_end, customer:customers(name)")
+    .eq("status", "open")
+    .lte("cycle_end", today)
+    .order("cycle_end")
+    .limit(10);
+
+  return (data as unknown as OpenCycle[]) || [];
 }
 
 async function checkAndGenerateExpiringPayments() {
@@ -192,11 +217,12 @@ export default async function DashboardPage() {
   // Check and generate payments for expired memberships
   await checkAndGenerateExpiringPayments();
 
-  const [stats, expiringMembers, pendingPayments, todayAppointments] = await Promise.all([
+  const [stats, expiringMembers, pendingPayments, todayAppointments, cyclesReadyToClose] = await Promise.all([
     getStats(),
     getExpiringMembers(),
     getPendingPayments(),
     getTodayAppointments(),
+    getCyclesReadyToClose(),
   ]);
 
   const totalPending = pendingPayments.reduce((acc, p) => acc + p.amount, 0);
@@ -218,8 +244,34 @@ export default async function DashboardPage() {
       </div>
 
       {/* Alerts */}
-      {(expiredMembers.length > 0 || pendingPayments.length > 0) && (
+      {(expiredMembers.length > 0 || pendingPayments.length > 0 || cyclesReadyToClose.length > 0) && (
         <div className="space-y-3">
+          {cyclesReadyToClose.length > 0 && (
+            <div className="p-4 bg-orange-900/20 border border-orange-900/50 rounded-lg flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-orange-900/30 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="font-medium text-orange-400">
+                    {cyclesReadyToClose.length} {cyclesReadyToClose.length === 1 ? "ciclo pronto para fechar" : "ciclos prontos para fechar"}
+                  </p>
+                  <p className="text-sm text-orange-400/70">
+                    R$ {cyclesReadyToClose.reduce((acc, c) => acc + c.total_amount, 0).toFixed(2).replace(".", ",")} em receita de planos
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/dashboard/financeiro/comissoes?filter=open"
+                className="px-4 py-2 bg-orange-900/30 text-orange-400 rounded-lg text-sm hover:bg-orange-900/50 transition-colors"
+              >
+                Gerenciar ciclos
+              </Link>
+            </div>
+          )}
+
           {expiredMembers.length > 0 && (
             <div className="p-4 bg-red-900/20 border border-red-900/50 rounded-lg flex items-center justify-between">
               <div className="flex items-center gap-3">

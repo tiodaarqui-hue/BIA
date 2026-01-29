@@ -14,6 +14,11 @@ interface Message {
   type: "bot" | "user";
   text: string;
   options?: { label: string; value: string }[];
+  multiSelect?: boolean;
+  selectedValues?: string[];
+  isVipGreeting?: boolean;
+  memberName?: string;
+  planName?: string;
 }
 
 interface Service {
@@ -21,6 +26,7 @@ interface Service {
   name: string;
   price: number;
   duration_minutes: number;
+  is_member_only: boolean;
 }
 
 interface Barber {
@@ -248,13 +254,19 @@ export function BookingChat({
   const [barbers, setBarbers] = useState<Barber[]>([]);
   const [slots, setSlots] = useState<string[]>([]);
 
-  const [selectedService, setSelectedService] = useState<Service | null>(null);
+  // Multi-service selection
+  const [selectedServices, setSelectedServices] = useState<Service[]>([]);
+  const [pendingServiceIds, setPendingServiceIds] = useState<Set<string>>(new Set());
+
   const [selectedBarber, setSelectedBarber] = useState<Barber | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
 
   const [consecutiveMessages, setConsecutiveMessages] = useState(0);
   const [sessionTimeout, setSessionTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [isCustomerMember, setIsCustomerMember] = useState(false);
+  const [coveredServiceIds, setCoveredServiceIds] = useState<string[]>([]);
+  const [memberPlanName, setMemberPlanName] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -265,16 +277,30 @@ export function BookingChat({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Helper to check if service is covered by plan
+  function isServiceCovered(serviceId: string): boolean {
+    return coveredServiceIds.includes(serviceId);
+  }
+
+  // Calculate totals from selected services
+  const totalDuration = selectedServices.reduce((sum, s) => sum + s.duration_minutes, 0);
+  const totalPrice = selectedServices.reduce((sum, s) => sum + Number(s.price), 0);
+  // Price to charge (excluding covered services)
+  const chargeablePrice = selectedServices
+    .filter((s) => !isServiceCovered(s.id))
+    .reduce((sum, s) => sum + Number(s.price), 0);
+  const coveredAmount = totalPrice - chargeablePrice;
+
   // Load initial data and check for existing appointments
   useEffect(() => {
     let mounted = true;
 
     async function loadData() {
-      // Load services, barbers, and check for existing appointments in parallel
-      const [servicesRes, barbersRes, appointmentsRes] = await Promise.all([
+      // Load services, barbers, customer membership, and check for existing appointments in parallel
+      const [servicesRes, barbersRes, appointmentsRes, customerRes] = await Promise.all([
         supabase
           .from("services")
-          .select("id, name, price, duration_minutes")
+          .select("id, name, price, duration_minutes, is_member_only")
           .eq("barbershop_id", barbershopId)
           .eq("is_active", true)
           .order("name"),
@@ -294,11 +320,43 @@ export function BookingChat({
           .gte("scheduled_at", new Date().toISOString())
           .order("scheduled_at", { ascending: true })
           .limit(1),
+        // Check customer membership status and plan
+        supabase
+          .from("customers")
+          .select("is_member, member_expires_at, member_plan_id")
+          .eq("id", customer.id)
+          .single(),
       ]);
 
       if (!mounted) return;
 
-      setServices(servicesRes.data || []);
+      // Check if customer has active membership
+      const customerData = customerRes.data;
+      const isMember = customerData?.is_member &&
+        (!customerData.member_expires_at || new Date(customerData.member_expires_at) > new Date());
+      setIsCustomerMember(isMember);
+
+      // If member, fetch included services and plan name
+      if (isMember && customerData?.member_plan_id) {
+        const { data: planData } = await supabase
+          .from("member_plans")
+          .select("name, included_service_ids")
+          .eq("id", customerData.member_plan_id)
+          .single();
+        setCoveredServiceIds(planData?.included_service_ids || []);
+        setMemberPlanName(planData?.name || null);
+      } else {
+        setCoveredServiceIds([]);
+        setMemberPlanName(null);
+      }
+
+      // Filter services: hide member-only services from non-members
+      const allServices = servicesRes.data || [];
+      const availableServices = isMember
+        ? allServices
+        : allServices.filter((s) => !s.is_member_only);
+
+      setServices(availableServices);
       setBarbers(barbersRes.data || []);
 
       // Check if customer has existing appointment
@@ -308,10 +366,16 @@ export function BookingChat({
         // Show existing appointment and ask if they want to schedule another
         const aptDate = new Date(existingAppointment.scheduled_at);
         setStep("done");
+
+        // VIP greeting for members
+        const greeting = isMember
+          ? `👑 Olá ${customer.name.split(" ")[0]}! Você já tem um agendamento:\n\n`
+          : `Olá ${customer.name.split(" ")[0]}! Você já tem um agendamento:\n\n`;
+
         setMessages([{
           id: generateMessageId(),
           type: "bot",
-          text: `Olá ${customer.name.split(" ")[0]}! Você já tem um agendamento:\n\n` +
+          text: greeting +
             `📋 ${existingAppointment.service?.name}\n` +
             `✂️ ${existingAppointment.barber?.name}\n` +
             `📅 ${aptDate.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} às ${aptDate.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}\n\n` +
@@ -322,14 +386,54 @@ export function BookingChat({
           ],
         }]);
       } else {
-        // No existing appointment, start normal flow
+        // Get covered service IDs and plan name for label generation
+        let covered: string[] = [];
+        let planName: string | null = null;
+        if (isMember && customerData?.member_plan_id) {
+          const planRes = await supabase
+            .from("member_plans")
+            .select("name, included_service_ids")
+            .eq("id", customerData.member_plan_id)
+            .single();
+          covered = planRes.data?.included_service_ids || [];
+          planName = planRes.data?.name || null;
+        }
+
+        // Build greeting text (VIP styling will be applied in render)
+        let greetingText: string;
+        const coveredServiceNames = availableServices
+          .filter((s) => covered.includes(s.id))
+          .map((s) => s.name);
+
+        if (isMember && planName && coveredServiceNames.length > 0) {
+          greetingText = `Seus serviços inclusos:\n${coveredServiceNames.map((n) => `✅ ${n}`).join("\n")}\n\nEscolha os serviços que deseja:`;
+        } else if (isMember && planName) {
+          greetingText = `Escolha os serviços que deseja:`;
+        } else {
+          greetingText = `Olá ${customer.name.split(" ")[0]}! Quais serviços você quer? (pode escolher mais de um)`;
+        }
+
+        // No existing appointment, start normal flow with multi-select
         setMessages((prev) => {
           if (prev.length > 0) return prev;
           return [{
             id: generateMessageId(),
             type: "bot",
-            text: `Olá ${customer.name.split(" ")[0]}! Qual serviço você quer?`,
-            options: (servicesRes.data || []).map((s) => ({ label: `${s.name} - R$${s.price}`, value: s.id })),
+            text: greetingText,
+            options: availableServices.map((s) => {
+              const isCovered = covered.includes(s.id);
+              if (isCovered) {
+                return { label: `✅ ${s.name} - Coberto`, value: s.id };
+              } else if (s.is_member_only) {
+                return { label: `⭐ ${s.name} - R$${s.price}`, value: s.id };
+              }
+              return { label: `${s.name} - R$${s.price}`, value: s.id };
+            }),
+            multiSelect: true,
+            selectedValues: [],
+            isVipGreeting: isMember && !!planName,
+            memberName: customer.name.split(" ")[0],
+            planName: planName || undefined,
           }];
         });
       }
@@ -342,10 +446,10 @@ export function BookingChat({
     };
   }, [barbershopId, customer.id, customer.name, supabase]);
 
-  function addBotMessage(text: string, options?: { label: string; value: string }[]) {
+  function addBotMessage(text: string, options?: { label: string; value: string }[], multiSelect?: boolean) {
     setMessages((prev) => [
       ...prev,
-      { id: generateMessageId(), type: "bot", text, options },
+      { id: generateMessageId(), type: "bot", text, options, multiSelect, selectedValues: multiSelect ? [] : undefined },
     ]);
   }
 
@@ -354,6 +458,76 @@ export function BookingChat({
       ...prev,
       { id: generateMessageId(), type: "user", text },
     ]);
+  }
+
+  // Toggle service selection in multi-select mode
+  function handleServiceToggle(serviceId: string) {
+    setPendingServiceIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(serviceId)) {
+        newSet.delete(serviceId);
+      } else {
+        newSet.add(serviceId);
+      }
+      return newSet;
+    });
+
+    // Update message's selectedValues for visual feedback
+    setMessages((prev) => prev.map((msg, idx) => {
+      if (idx === prev.length - 1 && msg.multiSelect) {
+        const newSelectedValues = msg.selectedValues || [];
+        const hasValue = newSelectedValues.includes(serviceId);
+        return {
+          ...msg,
+          selectedValues: hasValue
+            ? newSelectedValues.filter((v) => v !== serviceId)
+            : [...newSelectedValues, serviceId],
+        };
+      }
+      return msg;
+    }));
+  }
+
+  // Confirm multi-service selection
+  function handleConfirmServices() {
+    if (pendingServiceIds.size === 0) return;
+
+    const selected = services.filter((s) => pendingServiceIds.has(s.id));
+    setSelectedServices(selected);
+    setPendingServiceIds(new Set());
+
+    const serviceNames = selected.map((s) => s.name).join(", ");
+    const chargeable = selected
+      .filter((s) => !isServiceCovered(s.id))
+      .reduce((sum, s) => sum + Number(s.price), 0);
+    const covered = selected
+      .filter((s) => isServiceCovered(s.id))
+      .reduce((sum, s) => sum + Number(s.price), 0);
+
+    let priceInfo: string;
+    if (covered > 0 && chargeable > 0) {
+      priceInfo = `R$${chargeable.toFixed(2).replace(".", ",")} (+R$${covered.toFixed(2).replace(".", ",")} coberto)`;
+    } else if (chargeable === 0) {
+      priceInfo = "Coberto pelo plano";
+    } else {
+      priceInfo = `R$${chargeable.toFixed(2).replace(".", ",")}`;
+    }
+
+    addUserMessage(`${serviceNames} (${priceInfo})`);
+
+    setStep("barber");
+    setLoading(true);
+
+    setTimeout(() => {
+      addBotMessage(
+        "Legal! Tem preferência pelo Barbeiro?",
+        [
+          { label: "Sem preferência", value: "none" },
+          ...barbers.map((b) => ({ label: b.name, value: b.id })),
+        ]
+      );
+      setLoading(false);
+    }, 500);
   }
 
   async function handleOptionClick(value: string, label: string) {
@@ -366,9 +540,10 @@ export function BookingChat({
 
     switch (step) {
       case "service":
+        // Single service selection (fallback for old flow)
         const service = services.find((s) => s.id === value);
         if (service) {
-          setSelectedService(service);
+          setSelectedServices([service]);
           setStep("barber");
           setTimeout(() => {
             addBotMessage(
@@ -433,12 +608,12 @@ export function BookingChat({
         setSelectedDate(targetDate);
         setStep("time");
 
-        // Fetch available slots
+        // Fetch available slots with total duration
         const dateStr = targetDate.toISOString().split("T")[0];
         const params = new URLSearchParams({
           barbershopId,
           date: dateStr,
-          duration: (selectedService?.duration_minutes || 30).toString(),
+          duration: totalDuration.toString(),
         });
         if (selectedBarber) {
           params.set("barberId", selectedBarber.id);
@@ -483,13 +658,30 @@ export function BookingChat({
           month: "2-digit",
         });
 
+        // Build services list for confirmation (showing covered status)
+        const servicesText = selectedServices.map((s) => {
+          const covered = isServiceCovered(s.id);
+          return covered ? `📋 ${s.name} ✅ Coberto` : `📋 ${s.name}`;
+        }).join("\n");
+
+        // Build price text
+        let priceText: string;
+        if (coveredAmount > 0 && chargeablePrice > 0) {
+          priceText = `💰 A pagar: R$ ${chargeablePrice.toFixed(2).replace(".", ",")}\n✅ Coberto pelo plano: R$ ${coveredAmount.toFixed(2).replace(".", ",")}`;
+        } else if (chargeablePrice === 0) {
+          priceText = `✅ Totalmente coberto pelo plano!`;
+        } else {
+          priceText = `💰 Total: R$ ${chargeablePrice.toFixed(2).replace(".", ",")}`;
+        }
+
         setTimeout(() => {
           addBotMessage(
             `Confirma agendamento?\n\n` +
-            `📋 ${selectedService?.name}\n` +
+            `${servicesText}\n` +
             `✂️ ${selectedBarber?.name || "Primeiro disponível"}\n` +
             `📅 ${dateFormatted}\n` +
-            `🕐 ${value}`,
+            `🕐 ${value}\n` +
+            `${priceText}`,
             [
               { label: "✅ Confirmar", value: "yes" },
               { label: "❌ Cancelar", value: "no" },
@@ -512,7 +704,7 @@ export function BookingChat({
             body: JSON.stringify({
               customerId: customer.id,
               barberId: selectedBarber?.id || null,
-              serviceId: selectedService?.id,
+              serviceIds: selectedServices.map((s) => s.id),
               scheduledAt: scheduledAt.toISOString(),
               barbershopId,
             }),
@@ -607,7 +799,7 @@ export function BookingChat({
 
     // Try to match input to current options using smart matching
     const currentMessage = messages.filter((m) => m.type === "bot").pop();
-    if (currentMessage?.options) {
+    if (currentMessage?.options && !currentMessage.multiSelect) {
       const match = findBestMatch(text, currentMessage.options);
       if (match) {
         handleOptionClick(match.value, match.label);
@@ -643,19 +835,58 @@ export function BookingChat({
     if (sessionTimeout) clearTimeout(sessionTimeout);
     setMessages([]);
     setStep("service");
-    setSelectedService(null);
+    setSelectedServices([]);
+    setPendingServiceIds(new Set());
     setSelectedBarber(null);
     setSelectedDate(null);
     setSelectedTime(null);
     setConsecutiveMessages(0);
 
+    // Build greeting text (VIP styling will be applied in render)
+    let greetingText: string;
+    const coveredServiceNames = services
+      .filter((s) => coveredServiceIds.includes(s.id))
+      .map((s) => s.name);
+
+    if (isCustomerMember && memberPlanName && coveredServiceNames.length > 0) {
+      greetingText = `Seus serviços inclusos:\n${coveredServiceNames.map((n) => `✅ ${n}`).join("\n")}\n\nEscolha os serviços que deseja:`;
+    } else if (isCustomerMember && memberPlanName) {
+      greetingText = `Escolha os serviços que deseja:`;
+    } else {
+      greetingText = `Olá ${customer.name.split(" ")[0]}! Quais serviços você quer? (pode escolher mais de um)`;
+    }
+
     setTimeout(() => {
-      addBotMessage(
-        `Olá ${customer.name.split(" ")[0]}! Qual serviço você quer?`,
-        services.map((s) => ({ label: `${s.name} - R$${s.price}`, value: s.id }))
-      );
+      setMessages([{
+        id: generateMessageId(),
+        type: "bot",
+        text: greetingText,
+        options: services.map((s) => {
+          const isCovered = coveredServiceIds.includes(s.id);
+          if (isCovered) {
+            return { label: `✅ ${s.name} - Coberto`, value: s.id };
+          } else if (s.is_member_only) {
+            return { label: `⭐ ${s.name} - R$${s.price}`, value: s.id };
+          }
+          return { label: `${s.name} - R$${s.price}`, value: s.id };
+        }),
+        multiSelect: true,
+        selectedValues: [],
+        isVipGreeting: isCustomerMember && !!memberPlanName,
+        memberName: customer.name.split(" ")[0],
+        planName: memberPlanName || undefined,
+      }]);
     }, 500);
   }
+
+  // Calculate pending selection totals for display
+  const pendingServices = services.filter((s) => pendingServiceIds.has(s.id));
+  const pendingTotal = pendingServices.reduce((sum, s) => sum + Number(s.price), 0);
+  const pendingChargeable = pendingServices
+    .filter((s) => !isServiceCovered(s.id))
+    .reduce((sum, s) => sum + Number(s.price), 0);
+  const pendingCovered = pendingTotal - pendingChargeable;
+  const pendingDuration = pendingServices.reduce((sum, s) => sum + s.duration_minutes, 0);
 
   return (
     <div className="flex-1 flex flex-col w-full max-w-2xl mx-auto">
@@ -669,13 +900,89 @@ export function BookingChat({
             <div
               className={`max-w-[85%] sm:max-w-[80%] rounded-2xl px-3 py-2.5 sm:px-4 sm:py-3 ${
                 msg.type === "user"
-                  ? "bg-primary text-primary-foreground rounded-br-md"
+                  ? isCustomerMember
+                    ? "bg-gradient-to-r from-amber-900/40 to-yellow-900/40 border border-amber-600/30 rounded-br-md"
+                    : "bg-primary text-primary-foreground rounded-br-md"
                   : "bg-card border border-border rounded-bl-md"
               }`}
             >
-              <p className="whitespace-pre-line text-[15px] sm:text-base leading-relaxed">{msg.text}</p>
+              {/* VIP greeting header for members */}
+              {msg.type === "bot" && msg.isVipGreeting && msg.memberName && msg.planName && (
+                <div className="flex items-center gap-2 mb-3 pb-2 border-b border-amber-600/30">
+                  <svg className="w-5 h-5 member-shimmer drop-shadow-[0_0_6px_rgba(251,191,36,0.8)]" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm0 3h14v2H5v-2z"/>
+                  </svg>
+                  <span className="text-[15px] sm:text-base">
+                    Olá <span className="member-shimmer font-semibold">{msg.memberName}</span>! Você é membro <span className="member-shimmer font-semibold">{msg.planName}</span>.
+                  </span>
+                </div>
+              )}
+              {/* Member VIP name with crown for user messages */}
+              {msg.type === "user" && isCustomerMember && (
+                <div className="flex items-center gap-1.5 mb-1">
+                  <svg className="w-4 h-4 member-shimmer drop-shadow-[0_0_4px_rgba(251,191,36,0.6)]" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm0 3h14v2H5v-2z"/>
+                  </svg>
+                  <span className="member-shimmer text-sm font-medium">
+                    {customer.name.split(" ")[0]}
+                  </span>
+                </div>
+              )}
+              <p className={`whitespace-pre-line text-[15px] sm:text-base leading-relaxed ${
+                msg.type === "user" && isCustomerMember ? "text-amber-100" : ""
+              }`}>{msg.text}</p>
 
-              {msg.options && (
+              {msg.options && msg.multiSelect ? (
+                // Multi-select mode for services
+                <div className="mt-3 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    {msg.options.map((opt, index) => {
+                      const isSelected = pendingServiceIds.has(opt.value);
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() => handleServiceToggle(opt.value)}
+                          disabled={loading}
+                          className={`px-4 py-2.5 rounded-full text-sm font-medium transition-all touch-manipulation shadow-sm animate-fade-in ${
+                            isSelected
+                              ? "bg-primary text-primary-foreground ring-2 ring-primary ring-offset-2 ring-offset-card"
+                              : "bg-muted hover:bg-muted/80 text-foreground border border-border"
+                          }`}
+                          style={{ animationDelay: `${index * 50}ms` }}
+                        >
+                          {isSelected && "✓ "}{opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Selection summary and confirm button */}
+                  {pendingServiceIds.size > 0 && (
+                    <div className="pt-3 border-t border-border mt-3 space-y-2">
+                      <div className="text-sm text-muted-foreground">
+                        {pendingServiceIds.size} serviço{pendingServiceIds.size > 1 ? "s" : ""} •
+                        {pendingCovered > 0 ? (
+                          <>
+                            R$ {pendingChargeable.toFixed(2).replace(".", ",")}
+                            <span className="text-green-400 ml-1">(+R$ {pendingCovered.toFixed(2).replace(".", ",")} coberto)</span>
+                          </>
+                        ) : (
+                          <>R$ {pendingTotal.toFixed(2).replace(".", ",")}</>
+                        )} •
+                        {pendingDuration} min
+                      </div>
+                      <button
+                        onClick={handleConfirmServices}
+                        disabled={loading}
+                        className="w-full px-4 py-3 bg-primary hover:bg-primary/90 active:bg-primary/80 text-primary-foreground rounded-full text-sm font-medium transition-all disabled:opacity-50 touch-manipulation shadow-md"
+                      >
+                        Continuar com {pendingServiceIds.size === 1 ? "este serviço" : "estes serviços"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : msg.options ? (
+                // Single-select mode (barber, date, time, etc.)
                 <div className="mt-3 flex flex-wrap gap-2">
                   {msg.options.map((opt, index) => (
                     <button
@@ -689,7 +996,7 @@ export function BookingChat({
                     </button>
                   ))}
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         ))}

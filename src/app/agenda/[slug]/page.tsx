@@ -17,6 +17,7 @@ interface Appointment {
   barber_id: string;
   customer: {
     name: string;
+    is_member: boolean;
   };
   service: {
     name: string;
@@ -89,7 +90,7 @@ export default function PublicAgendaPage() {
   const scrollToCurrentTime = useCallback(() => {
     if (!agendaRef.current) return;
     const now = new Date();
-    const currentHour = now.getUTCHours();
+    const currentHour = now.getHours();
     const hourIndex = currentHour - settings.start_hour;
     if (hourIndex >= 0 && hourIndex < HOURS.length) {
       const rows = agendaRef.current.querySelectorAll("[data-hour]");
@@ -128,7 +129,7 @@ export default function PublicAgendaPage() {
         .from("agenda_settings")
         .select("*")
         .eq("barbershop_id", bsId)
-        .single();
+        .maybeSingle();
 
       if (settingsData) {
         setSettings({
@@ -156,7 +157,7 @@ export default function PublicAgendaPage() {
         .from("appointments")
         .select(`
           id, scheduled_at, duration_minutes, status, barber_id,
-          customer:customers(name),
+          customer:customers(name, is_member),
           service:services(name)
         `)
         .eq("barbershop_id", bsId)
@@ -199,7 +200,7 @@ export default function PublicAgendaPage() {
             .from("appointments")
             .select(`
               id, scheduled_at, duration_minutes, status, barber_id,
-              customer:customers(name),
+              customer:customers(name, is_member),
               service:services(name)
             `)
             .eq("barbershop_id", barbershopId)
@@ -238,7 +239,7 @@ export default function PublicAgendaPage() {
         .from("appointments")
         .select(`
           id, scheduled_at, duration_minutes, status, barber_id,
-          customer:customers(name),
+          customer:customers(name, is_member),
           service:services(name)
         `)
         .eq("barbershop_id", barbershopId)
@@ -251,7 +252,7 @@ export default function PublicAgendaPage() {
       }
     };
 
-    const interval = setInterval(refreshAppointments, 15000);
+    const interval = setInterval(refreshAppointments, 30000);
     return () => clearInterval(interval);
   }, [barbershopId, supabase, weekDays]);
 
@@ -292,7 +293,7 @@ export default function PublicAgendaPage() {
       return (
         apt.barber_id === barberId &&
         formatDate(aptDate) === formatDate(date) &&
-        aptDate.getUTCHours() === hour
+        aptDate.getHours() === hour
       );
     });
   }
@@ -419,7 +420,7 @@ export default function PublicAgendaPage() {
               </div>
               {filteredWeekDays.map((day, dayIndex) => {
                 const isToday = formatDate(day) === formatDate(currentTime);
-                const isCurrentHour = isToday && currentTime.getUTCHours() === hour;
+                const isCurrentHour = isToday && currentTime.getHours() === hour;
 
                 return (
                   <div
@@ -437,8 +438,15 @@ export default function PublicAgendaPage() {
                             statusColors[apt.status] || "bg-muted"
                           }`}
                         >
-                          <div className="font-medium truncate">
-                            {(apt.customer as { name: string })?.name}
+                          <div className="font-medium truncate flex items-center gap-1">
+                            {(apt.customer as { name: string; is_member: boolean })?.is_member && (
+                              <svg className="w-3 h-3 text-amber-400 drop-shadow-[0_0_4px_rgba(251,191,36,0.6)] shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm0 3h14v2H5v-2z"/>
+                              </svg>
+                            )}
+                            <span className={`truncate ${(apt.customer as { is_member: boolean })?.is_member ? "member-shimmer" : ""}`}>
+                              {(apt.customer as { name: string })?.name}
+                            </span>
                           </div>
                           <div className="text-muted-foreground truncate flex items-center gap-1">
                             <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

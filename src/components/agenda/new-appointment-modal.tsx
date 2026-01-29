@@ -8,6 +8,14 @@ interface Customer {
   id: string;
   name: string;
   phone: string;
+  is_member?: boolean;
+  member_expires_at?: string | null;
+  member_plan_id?: string | null;
+}
+
+interface MemberPlan {
+  id: string;
+  included_service_ids: string[] | null;
 }
 
 interface Barber {
@@ -20,6 +28,7 @@ interface Service {
   name: string;
   price: number;
   duration_minutes: number;
+  is_member_only: boolean;
 }
 
 interface NewAppointmentModalProps {
@@ -51,6 +60,9 @@ export function NewAppointmentModal({
   const [customerSearch, setCustomerSearch] = useState("");
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [showQuickCustomerModal, setShowQuickCustomerModal] = useState(false);
+  const [showServiceDropdown, setShowServiceDropdown] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [memberPlan, setMemberPlan] = useState<MemberPlan | null>(null);
 
   const [formData, setFormData] = useState({
     customerId: "",
@@ -71,7 +83,7 @@ export function NewAppointmentModal({
     async function loadData() {
       const [barbersRes, servicesRes] = await Promise.all([
         supabase.from("barbers").select("id, name").eq("is_active", true).order("name"),
-        supabase.from("services").select("id, name, price, duration_minutes").eq("is_active", true).order("name"),
+        supabase.from("services").select("id, name, price, duration_minutes, is_member_only").eq("is_active", true).order("name"),
       ]);
 
       if (isCancelled) return;
@@ -113,7 +125,7 @@ export function NewAppointmentModal({
     const timer = setTimeout(async () => {
       const { data } = await supabase
         .from("customers")
-        .select("id, name, phone")
+        .select("id, name, phone, is_member, member_expires_at, member_plan_id")
         .or(`name.ilike.%${customerSearch}%,phone.ilike.%${customerSearch}%`)
         .limit(10);
 
@@ -128,14 +140,45 @@ export function NewAppointmentModal({
     };
   }, [customerSearch, supabase]);
 
-  function selectCustomer(customer: Customer) {
+  // Close service dropdown when clicking outside
+  useEffect(() => {
+    if (!showServiceDropdown) return;
+    function handleClickOutside(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-service-dropdown]')) {
+        setShowServiceDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showServiceDropdown]);
+
+  async function selectCustomer(customer: Customer) {
     setFormData((prev) => ({
       ...prev,
       customerId: customer.id,
       customerName: `${customer.name} - ${customer.phone}`,
     }));
+    setSelectedCustomer(customer);
     setCustomerSearch("");
     setShowCustomerDropdown(false);
+
+    // If customer is an active member, fetch their plan's included services
+    const isActiveMember = customer.is_member &&
+      customer.member_plan_id &&
+      (!customer.member_expires_at || new Date(customer.member_expires_at) > new Date());
+
+    if (isActiveMember && customer.member_plan_id) {
+      const { data: plan } = await supabase
+        .from("member_plans")
+        .select("id, included_service_ids")
+        .eq("id", customer.member_plan_id)
+        .single();
+
+      setMemberPlan(plan || null);
+    } else {
+      setMemberPlan(null);
+    }
   }
 
   function handleQuickCustomerSuccess(customer: Customer) {
@@ -201,20 +244,92 @@ export function NewAppointmentModal({
       return;
     }
 
+    // Check if service is member-only and customer has active membership
+    if (selectedService.is_member_only) {
+      const { data: customerData } = await supabase
+        .from("customers")
+        .select("is_member, member_expires_at")
+        .eq("id", formData.customerId)
+        .single();
+
+      const isActiveMember = customerData?.is_member &&
+        (!customerData.member_expires_at || new Date(customerData.member_expires_at) > new Date());
+
+      if (!isActiveMember) {
+        setError("Este serviço é exclusivo para membros. O cliente selecionado não possui plano ativo.");
+        setLoading(false);
+        return;
+      }
+    }
+
+    // Get barbershop_id from current user's staff record
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setError("Usuário não autenticado");
+      setLoading(false);
+      return;
+    }
+
+    const { data: staffData } = await supabase
+      .from("staff")
+      .select("barbershop_id")
+      .eq("auth_user_id", user.id)
+      .single();
+
+    if (!staffData?.barbershop_id) {
+      setError("Barbearia não encontrada");
+      setLoading(false);
+      return;
+    }
+
     const scheduledAt = new Date(`${formData.date}T${formData.time}:00`);
+    const endTime = new Date(scheduledAt.getTime() + selectedService.duration_minutes * 60000);
 
-    const { error: insertError } = await supabase.from("appointments").insert({
-      customer_id: formData.customerId,
-      barber_id: formData.barberId,
-      service_id: formData.serviceId,
-      scheduled_at: scheduledAt.toISOString(),
-      duration_minutes: selectedService.duration_minutes,
-      price: selectedService.price,
-      status: "scheduled",
-    });
+    // Check if service is covered by member's plan
+    const isCovered = isServiceCoveredByPlan(formData.serviceId);
+    const priceToCharge = isCovered ? 0 : selectedService.price;
 
-    if (insertError) {
-      setError("Erro ao criar agendamento: " + insertError.message);
+    const { data: appointment, error: insertError } = await supabase
+      .from("appointments")
+      .insert({
+        customer_id: formData.customerId,
+        barber_id: formData.barberId,
+        service_id: formData.serviceId,
+        scheduled_at: scheduledAt.toISOString(),
+        end_time: endTime.toISOString(),
+        duration_minutes: selectedService.duration_minutes,
+        price: priceToCharge,
+        total_amount: priceToCharge,
+        is_member_slot: isCovered,
+        status: "scheduled",
+        barbershop_id: staffData.barbershop_id,
+      })
+      .select("id")
+      .single();
+
+    if (insertError || !appointment) {
+      setError("Erro ao criar agendamento: " + (insertError?.message || "Erro desconhecido"));
+      setLoading(false);
+      return;
+    }
+
+    // Create appointment_services record with coverage info
+    const { error: serviceInsertError } = await supabase
+      .from("appointment_services")
+      .insert({
+        appointment_id: appointment.id,
+        service_id: formData.serviceId,
+        barbershop_id: staffData.barbershop_id,
+        service_name_snapshot: selectedService.name,
+        duration_snapshot: selectedService.duration_minutes,
+        price_snapshot: selectedService.price,
+        covered_by_plan: isCovered,
+      });
+
+    if (serviceInsertError) {
+      // Rollback appointment if service insert fails
+      await supabase.from("appointments").delete().eq("id", appointment.id);
+      setError("Erro ao registrar serviço: " + serviceInsertError.message);
       setLoading(false);
       return;
     }
@@ -223,6 +338,11 @@ export function NewAppointmentModal({
     resetForm();
     onSuccess();
     onClose();
+  }
+
+  function isServiceCoveredByPlan(serviceId: string): boolean {
+    if (!memberPlan?.included_service_ids) return false;
+    return memberPlan.included_service_ids.includes(serviceId);
   }
 
   function resetForm() {
@@ -236,6 +356,9 @@ export function NewAppointmentModal({
     });
     setCustomerSearch("");
     setError("");
+    setShowServiceDropdown(false);
+    setSelectedCustomer(null);
+    setMemberPlan(null);
   }
 
   function handleClose() {
@@ -252,12 +375,24 @@ export function NewAppointmentModal({
           <label className="block text-sm text-muted-foreground mb-1">Cliente *</label>
           {formData.customerId ? (
             <div className="flex items-center gap-2">
-              <span className="flex-1 px-3 py-2 bg-muted rounded-lg text-sm">
+              <span className="flex-1 px-3 py-2 bg-muted rounded-lg text-sm flex items-center gap-2">
                 {formData.customerName}
+                {memberPlan && (
+                  <span className="px-2 py-0.5 text-xs rounded-full bg-amber-900/30 text-amber-400 flex items-center gap-1">
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                    </svg>
+                    Membro
+                  </span>
+                )}
               </span>
               <button
                 type="button"
-                onClick={() => setFormData((prev) => ({ ...prev, customerId: "", customerName: "" }))}
+                onClick={() => {
+                  setFormData((prev) => ({ ...prev, customerId: "", customerName: "" }));
+                  setSelectedCustomer(null);
+                  setMemberPlan(null);
+                }}
                 className="p-2 text-muted-foreground hover:text-foreground"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -325,20 +460,81 @@ export function NewAppointmentModal({
           </select>
         </div>
 
-        <div>
+        <div className="relative" data-service-dropdown>
           <label className="block text-sm text-muted-foreground mb-1">Serviço *</label>
-          <select
-            value={formData.serviceId}
-            onChange={(e) => setFormData((prev) => ({ ...prev, serviceId: e.target.value }))}
-            className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:border-primary"
+          <button
+            type="button"
+            onClick={() => setShowServiceDropdown(!showServiceDropdown)}
+            className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:border-primary text-left flex items-center justify-between"
           >
-            <option value="">Selecione...</option>
-            {services.map((service) => (
-              <option key={service.id} value={service.id}>
-                {service.name} - R$ {service.price.toFixed(2)} ({service.duration_minutes}min)
-              </option>
-            ))}
-          </select>
+            {formData.serviceId ? (
+              <span className="flex items-center gap-2">
+                {isServiceCoveredByPlan(formData.serviceId) ? (
+                  <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : services.find(s => s.id === formData.serviceId)?.is_member_only ? (
+                  <svg className="w-4 h-4 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  </svg>
+                ) : null}
+                <span>{services.find(s => s.id === formData.serviceId)?.name}</span>
+                {isServiceCoveredByPlan(formData.serviceId) && (
+                  <span className="text-xs text-green-400">Coberto</span>
+                )}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">Selecione...</span>
+            )}
+            <svg className={`w-4 h-4 text-muted-foreground transition-transform ${showServiceDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {showServiceDropdown && (
+            <div className="absolute z-20 w-full mt-1 bg-card border border-border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+              {services.map((service) => {
+                const isCovered = isServiceCoveredByPlan(service.id);
+                return (
+                  <button
+                    key={service.id}
+                    type="button"
+                    onClick={() => {
+                      setFormData((prev) => ({ ...prev, serviceId: service.id }));
+                      setShowServiceDropdown(false);
+                    }}
+                    className={`w-full px-3 py-2.5 text-left hover:bg-muted transition-colors flex items-center gap-3 ${
+                      formData.serviceId === service.id ? 'bg-muted/50' : ''
+                    } ${isCovered ? 'bg-green-900/10' : ''}`}
+                  >
+                    {isCovered ? (
+                      <svg className="w-4 h-4 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : service.is_member_only ? (
+                      <svg className="w-4 h-4 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)] shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                      </svg>
+                    ) : null}
+                    <div className={`flex-1 ${!isCovered && !service.is_member_only ? 'pl-7' : ''}`}>
+                      <p className="text-sm font-medium flex items-center gap-2">
+                        {service.name}
+                        {isCovered && (
+                          <span className="text-xs text-green-400 font-normal">Coberto</span>
+                        )}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {isCovered ? (
+                          <span><span className="line-through">R$ {service.price.toFixed(2).replace('.', ',')}</span> R$ 0,00</span>
+                        ) : (
+                          <>R$ {service.price.toFixed(2).replace('.', ',')}</>
+                        )} · {service.duration_minutes}min
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -363,14 +559,29 @@ export function NewAppointmentModal({
         </div>
 
         {selectedService && (
-          <div className="p-3 bg-muted rounded-lg text-sm">
+          <div className={`p-3 rounded-lg text-sm ${isServiceCoveredByPlan(selectedService.id) ? 'bg-green-900/20 border border-green-900/50' : 'bg-muted'}`}>
+            {isServiceCoveredByPlan(selectedService.id) && (
+              <div className="flex items-center gap-2 mb-2 text-green-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                <span className="font-medium">Coberto pelo plano</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Duração:</span>
               <span>{selectedService.duration_minutes} minutos</span>
             </div>
             <div className="flex justify-between mt-1">
               <span className="text-muted-foreground">Valor:</span>
-              <span className="font-medium">R$ {selectedService.price.toFixed(2)}</span>
+              {isServiceCoveredByPlan(selectedService.id) ? (
+                <span className="font-medium text-green-400">
+                  <span className="line-through text-muted-foreground mr-2">R$ {selectedService.price.toFixed(2)}</span>
+                  R$ 0,00
+                </span>
+              ) : (
+                <span className="font-medium">R$ {selectedService.price.toFixed(2)}</span>
+              )}
             </div>
           </div>
         )}
@@ -417,6 +628,7 @@ interface QuickCustomerModalProps {
 function QuickCustomerModal({ isOpen, onClose, onSuccess }: QuickCustomerModalProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [formData, setFormData] = useState({
     name: "",
     phone: "",
@@ -429,6 +641,7 @@ function QuickCustomerModal({ isOpen, onClose, onSuccess }: QuickCustomerModalPr
     if (isOpen) {
       setFormData({ name: "", phone: "", email: "" });
       setError("");
+      setSuccessMessage("");
     }
   }, [isOpen]);
 
@@ -443,25 +656,47 @@ function QuickCustomerModal({ isOpen, onClose, onSuccess }: QuickCustomerModalPr
 
     setLoading(true);
 
-    const { data, error: insertError } = await supabase
-      .from("customers")
-      .insert({
-        name: formData.name.trim(),
-        phone: formData.phone.trim(),
-        email: formData.email.trim() || null,
-      })
-      .select("id, name, phone")
-      .single();
-
-    if (insertError) {
-      if (insertError.code === "23505") {
-        setError("Já existe um cliente com este telefone");
-      } else {
-        setError("Erro ao cadastrar: " + insertError.message);
-      }
+    // Get barbershop_id from current user
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setError("Usuário não autenticado");
       setLoading(false);
       return;
     }
+
+    const { data: staffData } = await supabase
+      .from("staff")
+      .select("barbershop_id")
+      .eq("auth_user_id", user.id)
+      .single();
+
+    if (!staffData?.barbershop_id) {
+      setError("Barbearia não encontrada");
+      setLoading(false);
+      return;
+    }
+
+    // Call API to create customer with default password
+    const response = await fetch("/api/customer/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: formData.name.trim(),
+        phone: formData.phone.trim(),
+        email: formData.email.trim() || null,
+        barbershopId: staffData.barbershop_id,
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      setError(result.error || "Erro ao cadastrar cliente");
+      setLoading(false);
+      return;
+    }
+
+    const data = result.customer;
 
     setLoading(false);
     onSuccess(data);
@@ -520,6 +755,12 @@ function QuickCustomerModal({ isOpen, onClose, onSuccess }: QuickCustomerModalPr
               placeholder="email@exemplo.com"
               className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:border-primary"
             />
+          </div>
+
+          {/* Info about default password */}
+          <div className="p-3 bg-blue-900/20 border border-blue-900/50 rounded-lg text-xs text-blue-300">
+            <p className="font-medium">Senha padrão: 123456</p>
+            <p className="text-blue-400 mt-1">O cliente poderá usar este telefone e senha para agendar online.</p>
           </div>
 
           {error && (

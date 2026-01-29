@@ -17,6 +17,14 @@ interface Barbershop {
   name: string;
 }
 
+interface Appointment {
+  id: string;
+  scheduled_at: string;
+  status: string;
+  service: { name: string } | null;
+  barber: { name: string } | null;
+}
+
 export default function BookingPage() {
   const params = useParams();
   const slug = params.slug as string;
@@ -179,7 +187,7 @@ function CustomerAppointments({
   barbershopId: string;
   onBack: () => void;
 }) {
-  const [appointments, setAppointments] = useState<any[]>([]);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState<string | null>(null);
 

@@ -13,22 +13,45 @@ export async function verifyPassword(
   return bcrypt.compare(password, hash);
 }
 
+/**
+ * Formats phone to WhatsApp Brazil standard: +5562999990001
+ * Accepts: 62999990001, 5562999990001, +5562999990001, (62) 99999-0001
+ */
 export function formatPhone(phone: string): string {
-  // Remove all non-digits
   const digits = phone.replace(/\D/g, "");
 
-  // Ensure it has country code
+  // 11 digits: DDD + number (e.g., 62999990001)
   if (digits.length === 11) {
     return `+55${digits}`;
   }
+
+  // 13 digits with country code (e.g., 5562999990001)
   if (digits.length === 13 && digits.startsWith("55")) {
     return `+${digits}`;
   }
-  return digits;
+
+  // Return with +55 prefix as fallback
+  return `+55${digits}`;
 }
 
-export function validatePhone(phone: string): boolean {
+/**
+ * Validates Brazilian phone number for WhatsApp
+ * Format: DDD (2 digits) + 9-digit mobile number
+ */
+export function validatePhone(phone: string): { valid: boolean; error?: string } {
   const digits = phone.replace(/\D/g, "");
-  // Brazilian phone: 11 digits (2 DDD + 9 phone) or 13 with country code
-  return digits.length === 11 || (digits.length === 13 && digits.startsWith("55"));
+
+  // Accept 11 digits (DDD + number) or 13 digits (55 + DDD + number)
+  if (digits.length === 11) {
+    return { valid: true };
+  }
+
+  if (digits.length === 13 && digits.startsWith("55")) {
+    return { valid: true };
+  }
+
+  return {
+    valid: false,
+    error: "Telefone deve ter DDD + 9 dígitos (ex: 62999990001)"
+  };
 }

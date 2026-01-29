@@ -280,6 +280,7 @@ export default function ClientesPage() {
                         <CustomerName
                           name={customer.name}
                           noShowCount={customer.no_show_count}
+                          isMember={customer.is_member}
                           className="font-medium"
                         />
                         {customer.notes && (

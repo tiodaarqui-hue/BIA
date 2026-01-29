@@ -12,11 +12,20 @@ interface MemberPlan {
   price_monthly: number;
   is_active: boolean;
   created_at: string;
+  included_service_ids: string[];
   customer_count?: number;
+}
+
+interface Service {
+  id: string;
+  name: string;
+  price: number;
+  duration_minutes: number;
 }
 
 export default function PlanosPage() {
   const [plans, setPlans] = useState<MemberPlan[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [filter, setFilter] = useState<"all" | "active">("all");
@@ -27,37 +36,35 @@ export default function PlanosPage() {
   const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
-    async function loadPlans() {
+    async function loadData() {
       setLoading(true);
 
-      const { data: plansData } = await supabase
-        .from("member_plans")
-        .select("*")
-        .order("name");
+      const [plansRes, servicesRes, customerCountsRes] = await Promise.all([
+        supabase.from("member_plans").select("*").order("name"),
+        supabase.from("services").select("id, name, price, duration_minutes").eq("is_active", true).order("name"),
+        supabase.from("customers").select("member_plan_id").eq("is_member", true).not("member_plan_id", "is", null),
+      ]);
 
-      if (plansData) {
-        const { data: customerCounts } = await supabase
-          .from("customers")
-          .select("member_plan_id")
-          .eq("is_member", true)
-          .not("member_plan_id", "is", null);
-
+      if (plansRes.data) {
         const countMap: Record<string, number> = {};
-        customerCounts?.forEach((c) => {
+        customerCountsRes.data?.forEach((c) => {
           countMap[c.member_plan_id] = (countMap[c.member_plan_id] || 0) + 1;
         });
 
-        const plansWithCount = plansData.map((plan) => ({
+        const plansWithCount = plansRes.data.map((plan) => ({
           ...plan,
+          included_service_ids: plan.included_service_ids || [],
           customer_count: countMap[plan.id] || 0,
         }));
 
         setPlans(plansWithCount);
       }
+
+      setServices(servicesRes.data || []);
       setLoading(false);
     }
 
-    loadPlans();
+    loadData();
   }, [refreshKey, supabase]);
 
   const filteredPlans = useMemo(() => {
@@ -191,6 +198,27 @@ export default function PlanosPage() {
                       </p>
                     </div>
                   </div>
+
+                  {/* Included services */}
+                  <div className="mt-3 pt-3 border-t border-border/50">
+                    {plan.included_service_ids.length > 0 ? (
+                      <div className="flex items-center gap-2 text-sm">
+                        <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <span className="text-muted-foreground">
+                          {plan.included_service_ids.length} {plan.included_service_ids.length === 1 ? "serviço incluso" : "serviços inclusos"}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-sm">
+                        <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span className="text-amber-400">Nenhum serviço configurado</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -209,6 +237,7 @@ export default function PlanosPage() {
 
       <PlanModal
         plan={editingPlan}
+        services={services}
         isOpen={isModalOpen}
         onClose={handleModalClose}
         onSuccess={handleSuccess}
@@ -219,12 +248,13 @@ export default function PlanosPage() {
 
 interface PlanModalProps {
   plan: MemberPlan | null;
+  services: Service[];
   isOpen: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
+function PlanModal({ plan, services, isOpen, onClose, onSuccess }: PlanModalProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -233,6 +263,7 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
     description: "",
     price_monthly: "",
     is_active: true,
+    included_service_ids: [] as string[],
   });
 
   const supabase = useMemo(() => createClient(), []);
@@ -244,6 +275,7 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
         description: plan.description || "",
         price_monthly: plan.price_monthly.toString(),
         is_active: plan.is_active,
+        included_service_ids: plan.included_service_ids || [],
       });
     } else {
       setFormData({
@@ -251,10 +283,20 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
         description: "",
         price_monthly: "",
         is_active: true,
+        included_service_ids: [],
       });
     }
     setError("");
   }, [plan, isOpen]);
+
+  function toggleService(serviceId: string) {
+    setFormData((prev) => ({
+      ...prev,
+      included_service_ids: prev.included_service_ids.includes(serviceId)
+        ? prev.included_service_ids.filter((id) => id !== serviceId)
+        : [...prev.included_service_ids, serviceId],
+    }));
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -270,6 +312,12 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
       return;
     }
 
+    // Validation: active plan must have at least one included service
+    if (formData.is_active && formData.included_service_ids.length === 0) {
+      setError("Plano ativo deve ter pelo menos um serviço incluso. Selecione os serviços que este plano cobre.");
+      return;
+    }
+
     setLoading(true);
 
     const data = {
@@ -277,6 +325,7 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
       description: formData.description.trim() || null,
       price_monthly: parseFloat(formData.price_monthly),
       is_active: formData.is_active,
+      included_service_ids: formData.included_service_ids,
     };
 
     if (plan) {
@@ -348,6 +397,58 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
           />
         </div>
 
+        {/* Included Services Selection */}
+        <div className="pt-2 border-t border-border">
+          <label className="block text-sm text-muted-foreground mb-2">
+            Serviços Inclusos no Plano *
+          </label>
+          <p className="text-xs text-muted-foreground mb-3">
+            Selecione os serviços que os assinantes deste plano podem usar sem pagar extra.
+          </p>
+
+          <div className="max-h-48 overflow-y-auto border border-border rounded-lg divide-y divide-border">
+            {services.length === 0 ? (
+              <p className="p-3 text-sm text-muted-foreground">Nenhum serviço cadastrado</p>
+            ) : (
+              services.map((service) => {
+                const isSelected = formData.included_service_ids.includes(service.id);
+                return (
+                  <label
+                    key={service.id}
+                    className={`flex items-center gap-3 p-3 cursor-pointer transition-colors ${
+                      isSelected ? "bg-primary/10" : "hover:bg-muted/50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleService(service.id)}
+                      className="w-4 h-4 rounded border-border"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{service.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        R$ {service.price.toFixed(2).replace(".", ",")} · {service.duration_minutes}min
+                      </p>
+                    </div>
+                    {isSelected && (
+                      <svg className="w-4 h-4 text-primary shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                  </label>
+                );
+              })
+            )}
+          </div>
+
+          {formData.included_service_ids.length > 0 && (
+            <p className="mt-2 text-sm text-emerald-400">
+              ✓ {formData.included_service_ids.length} {formData.included_service_ids.length === 1 ? "serviço selecionado" : "serviços selecionados"}
+            </p>
+          )}
+        </div>
+
         <div className="pt-2 border-t border-border">
           <label className="flex items-center gap-3 cursor-pointer">
             <input
@@ -365,14 +466,12 @@ function PlanModal({ plan, isOpen, onClose, onSuccess }: PlanModalProps) {
           </label>
         </div>
 
-        <div className="p-3 bg-muted rounded-lg text-sm text-muted-foreground">
-          <p className="font-medium text-foreground mb-1">Benefícios para assinantes:</p>
-          <ul className="list-disc list-inside space-y-1">
-            <li>Acesso a horários exclusivos para membros</li>
-            <li>Serviços exclusivos para membros</li>
-            <li>Prioridade no agendamento</li>
-          </ul>
-        </div>
+        {formData.is_active && formData.included_service_ids.length === 0 && (
+          <div className="p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-400">
+            <p className="font-medium">⚠️ Atenção</p>
+            <p className="mt-1">Planos ativos precisam ter pelo menos um serviço incluso para gerar benefício ao cliente.</p>
+          </div>
+        )}
 
         {error && (
           <div className="p-3 bg-red-900/20 border border-red-900/50 rounded-lg text-sm text-red-400">

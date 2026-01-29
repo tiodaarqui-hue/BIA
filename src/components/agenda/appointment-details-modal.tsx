@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Modal } from "@/components/ui/modal";
-import { PaymentConfirmModal } from "@/components/ui/payment-confirm-modal";
 import { CustomerName } from "@/components/ui/customer-name";
 import { createClient } from "@/lib/supabase/client";
 
@@ -19,6 +18,7 @@ interface Appointment {
     name: string;
     phone: string;
     no_show_count: number;
+    is_member: boolean;
   };
   barber: {
     id: string;
@@ -53,7 +53,6 @@ export function AppointmentDetailsModal({
 }: AppointmentDetailsModalProps) {
   const [loading, setLoading] = useState(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
   const supabase = createClient();
 
   if (!appointment) return null;
@@ -64,13 +63,36 @@ export function AppointmentDetailsModal({
   async function updateStatus(newStatus: string) {
     if (!appointment) return;
 
-    // If completing, show payment modal first
+    setLoading(true);
+
+    // CRITICAL: Use atomic function for completing appointments
+    // This ensures payment is ALWAYS created and prevents race conditions
     if (newStatus === "completed") {
-      setShowPaymentModal(true);
+      const { data, error } = await supabase.rpc("complete_appointment_atomic", {
+        p_appointment_id: appointment.id,
+      });
+
+      if (error) {
+        console.error("Error completing appointment:", error);
+        setLoading(false);
+        return;
+      }
+
+      const result = data as { success: boolean; error?: string; payment_id?: string };
+
+      if (!result.success) {
+        console.error("Failed to complete appointment:", result.error);
+        setLoading(false);
+        return;
+      }
+
+      onUpdate();
+      onClose();
+      setLoading(false);
       return;
     }
 
-    setLoading(true);
+    // Other status changes (no_show, cancelled) use direct update
     const { error } = await supabase
       .from("appointments")
       .update({ status: newStatus })
@@ -91,22 +113,6 @@ export function AppointmentDetailsModal({
     }
     setLoading(false);
     setShowCancelConfirm(false);
-  }
-
-  async function handlePaymentSuccess() {
-    if (!appointment) return;
-
-    // Update appointment status to completed
-    const { error } = await supabase
-      .from("appointments")
-      .update({ status: "completed" })
-      .eq("id", appointment.id);
-
-    if (!error) {
-      setShowPaymentModal(false);
-      onUpdate();
-      onClose();
-    }
   }
 
   function formatDateTime(date: Date): string {
@@ -152,6 +158,7 @@ export function AppointmentDetailsModal({
               <CustomerName
                 name={appointment.customer.name}
                 noShowCount={appointment.customer.no_show_count}
+                isMember={appointment.customer.is_member}
                 className="font-medium"
               />
               <p className="text-sm text-muted-foreground">{appointment.customer.phone}</p>
@@ -265,18 +272,6 @@ export function AppointmentDetailsModal({
         </div>
       </div>
 
-      {appointment && (
-        <PaymentConfirmModal
-          isOpen={showPaymentModal}
-          onClose={() => setShowPaymentModal(false)}
-          onSuccess={handlePaymentSuccess}
-          customerId={appointment.customer.id}
-          customerName={appointment.customer.name}
-          amount={appointment.price}
-          description={appointment.service.name}
-          appointmentId={appointment.id}
-        />
-      )}
     </Modal>
   );
 }
