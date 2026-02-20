@@ -21,6 +21,7 @@ export function AgendaSettingsModal({ isOpen, onClose, onSave }: AgendaSettingsM
 
   const [startHour, setStartHour] = useState(8);
   const [endHour, setEndHour] = useState(20);
+  const [slotInterval, setSlotInterval] = useState(30);
   const [sundayEnabled, setSundayEnabled] = useState(false);
 
   const supabase = useMemo(() => createClient(), []);
@@ -45,7 +46,7 @@ export function AgendaSettingsModal({ isOpen, onClose, onSave }: AgendaSettingsM
         setSettingsId(data.id);
         setStartHour(data.start_hour);
         setEndHour(data.end_hour);
-        // Check if Sunday (0) is in enabled_days
+        setSlotInterval(data.slot_interval ?? 30);
         setSundayEnabled((data.enabled_days || []).includes(0));
       }
 
@@ -70,6 +71,7 @@ export function AgendaSettingsModal({ isOpen, onClose, onSave }: AgendaSettingsM
     const settingsData = {
       start_hour: startHour,
       end_hour: endHour,
+      slot_interval: slotInterval,
       enabled_days: enabledDays,
     };
 
@@ -128,6 +130,24 @@ export function AgendaSettingsModal({ isOpen, onClose, onSave }: AgendaSettingsM
                 ))}
               </select>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm text-muted-foreground mb-3">Intervalo entre horários</label>
+            <select
+              value={slotInterval}
+              onChange={(e) => setSlotInterval(Number(e.target.value))}
+              className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:border-primary"
+            >
+              <option value={15}>15 minutos</option>
+              <option value={30}>30 minutos</option>
+              <option value={45}>45 minutos</option>
+              <option value={60}>60 minutos</option>
+              <option value={90}>90 minutos</option>
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">
+              Define os horários disponíveis para o cliente agendar
+            </p>
           </div>
 
           <div>
