@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { toBrazilTime } from "@/lib/timezone";
+import { toBrazilTime, getBrazilDayRange } from "@/lib/timezone";
 import { bookingSchema, validateBody } from "@/lib/validations";
 import { ErrorCodes, createError } from "@/lib/errors";
 
@@ -311,18 +311,15 @@ async function checkBarberAvailability(
 
   // Check for conflicting appointments (using end_time)
   const endTime = new Date(scheduledDate.getTime() + durationMinutes * 60000);
-  const startOfDay = new Date(scheduledDate);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(scheduledDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  const { startUtc, endUtc } = getBrazilDayRange(brazilTime.dateStr);
 
   const { data: appointments } = await supabase
     .from("appointments")
     .select("scheduled_at, end_time")
     .eq("barber_id", barberId)
     .eq("barbershop_id", barbershopId)
-    .gte("scheduled_at", startOfDay.toISOString())
-    .lte("scheduled_at", endOfDay.toISOString())
+    .gte("scheduled_at", startUtc.toISOString())
+    .lte("scheduled_at", endUtc.toISOString())
     .neq("status", "cancelled");
 
   if (appointments) {

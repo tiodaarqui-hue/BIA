@@ -15,15 +15,19 @@ export interface BrazilTime {
  * Works regardless of server timezone
  */
 export function toBrazilTime(date: Date): BrazilTime {
-  const brazilOffset = -3 * 60; // UTC-3 in minutes
+  const BRAZIL_TZ_OFFSET = 180; // UTC-3 expressed as getTimezoneOffset() = +180 minutes
   const localOffset = date.getTimezoneOffset();
-  const brazilDate = new Date(date.getTime() + (localOffset - brazilOffset) * 60000);
+  const brazilDate = new Date(date.getTime() + (localOffset - BRAZIL_TZ_OFFSET) * 60000);
+
+  const year = brazilDate.getFullYear();
+  const month = String(brazilDate.getMonth() + 1).padStart(2, "0");
+  const day = String(brazilDate.getDate()).padStart(2, "0");
 
   return {
     hours: brazilDate.getHours(),
     minutes: brazilDate.getMinutes(),
     dayOfWeek: brazilDate.getDay(),
-    dateStr: brazilDate.toISOString().split("T")[0],
+    dateStr: `${year}-${month}-${day}`,
   };
 }
 
